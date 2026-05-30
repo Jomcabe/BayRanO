@@ -34,8 +34,13 @@ class MockDeviceController(private val context: Context) {
     private var kit: MockDeviceKitInterface? = null
     private var device: MockRaybanMeta? = null
 
-    /** Enable the kit, grant camera consent, pair + wear the glasses, feed a frame. */
-    fun enableAndPair() {
+    /**
+     * Turn the kit on with a registered mock manifest. MUST run *before*
+     * [com.meta.wearable.dat.core.Wearables.initialize] — the SDK reads the
+     * registration manifest during init, so enabling the kit afterwards leaves
+     * the injected device ineligible ("No eligible device found").
+     */
+    fun enable() {
         val k = MockDeviceKit.getInstance(context)
         if (!k.isEnabled) {
             k.enable(
@@ -47,10 +52,16 @@ class MockDeviceController(private val context: Context) {
         }
         // Belt-and-braces: ensure the glasses' camera permission reads as granted.
         k.permissions.set(Permission.CAMERA, PermissionStatus.Granted)
+        kit = k
+    }
 
-        // Reuse the already-paired device if enableAndPair runs again (e.g. a
-        // retry after a failed connect); pairing twice injects a duplicate into
-        // discovery and confuses AutoDeviceSelector.
+    /**
+     * Pair + wear the glasses and feed a frame. Runs *after* Wearables init so
+     * the device surfaces in discovery. Idempotent: reuses the already-paired
+     * device on a retry instead of injecting a duplicate.
+     */
+    fun pairAndWear() {
+        val k = kit ?: return
         val d = device ?: k.pairRaybanMeta()
         d.powerOn()
         d.don() // "donning" = wearing; required before the camera will stream.
@@ -59,7 +70,6 @@ class MockDeviceController(private val context: Context) {
         d.services.camera.setCapturedImage(frame) // what capturePhoto() returns
         d.services.camera.setCameraFeed(frame)     // what the video stream shows
 
-        kit = k
         device = d
     }
 
