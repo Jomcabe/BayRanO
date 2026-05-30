@@ -48,7 +48,10 @@ class MockDeviceController(private val context: Context) {
         // Belt-and-braces: ensure the glasses' camera permission reads as granted.
         k.permissions.set(Permission.CAMERA, PermissionStatus.Granted)
 
-        val d = k.pairRaybanMeta()
+        // Reuse the already-paired device if enableAndPair runs again (e.g. a
+        // retry after a failed connect); pairing twice injects a duplicate into
+        // discovery and confuses AutoDeviceSelector.
+        val d = device ?: k.pairRaybanMeta()
         d.powerOn()
         d.don() // "donning" = wearing; required before the camera will stream.
 
