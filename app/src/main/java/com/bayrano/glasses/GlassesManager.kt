@@ -13,15 +13,10 @@ import com.meta.wearable.dat.core.selectors.AutoDeviceSelector
 import com.meta.wearable.dat.core.session.DeviceSession
 import com.meta.wearable.dat.core.session.DeviceSessionState
 import com.meta.wearable.dat.core.types.RegistrationState
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -32,62 +27,40 @@ import kotlinx.coroutines.withTimeoutOrNull
  * The connect path is identical for real glasses and the emulator: the Mock
  * Device Kit ([MockDeviceController]) injects a fake device into [Wearables]
  * discovery, then the same createSession → addStream → start sequence runs.
+ *
+ * Lifecycle note: `Wearables.initialize` can only run once per process and the
+ * Mock Device Kit must be enabled *before* it (the SDK reads the registration
+ * manifest during init). So the *first* connect of the process fixes whether
+ * we're in mock or real mode — see [connect].
  */
 class GlassesManager(private val appContext: Context) {
 
     private val mock = MockDeviceController(appContext)
 
-    // Process-lived scope. Its collectors below hold strong references to the
-    // SDK's state monitors, which the toolkit otherwise keeps only weakly — see
-    // [startMonitors].
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-
     private val _state = MutableStateFlow<GlassesState>(GlassesState.Unregistered)
     val state: StateFlow<GlassesState> = _state.asStateFlow()
-
-    // Mirrors of the SDK flows. Reading these (instead of one-shot `.value` /
-    // `.first {}` against Wearables directly) goes through the long-lived
-    // collectors started in [startMonitors], so the monitors stay alive.
-    private val registration = MutableStateFlow<RegistrationState?>(null)
-    private val hasDevice = MutableStateFlow(false)
 
     private var session: DeviceSession? = null
     private var stream: Stream? = null
     private var initialized = false
-    private var monitorsStarted = false
+    private var initializedWithMock: Boolean? = null
 
     /** The live camera stream, if connected — used by [CameraController]. */
     fun currentStream(): Stream? = stream
 
-    /** Initialise the SDK once per process. Safe to call repeatedly. */
+    /**
+     * Initialise the SDK once per process. Safe to call repeatedly.
+     *
+     * Deliberately NOT called from `Application.onCreate` anymore: initialising
+     * eagerly bound the SDK to the real (unregistered) data layer before the
+     * mock kit could be enabled. Init is now deferred to the first [connect],
+     * after the mock kit has had its chance to enable.
+     */
     fun initialize() {
         if (initialized) return
         runCatching { Wearables.initialize(appContext) }
             .onFailure { Log.w(TAG, "Wearables.initialize failed", it) }
-        startMonitors()
         initialized = true
-    }
-
-    /**
-     * Keep long-lived collectors on the SDK's registration and device flows.
-     *
-     * The toolkit holds its `ACDC` state monitors via *weak* references: once
-     * nothing is actively collecting `Wearables.registrationState` /
-     * `Wearables.devices`, the monitors get garbage-collected, registration
-     * "reverts to null", and an injected mock device drops out of discovery.
-     * That made [connect] fail intermittently with "Could not create a device
-     * session" depending on GC timing. Collecting for the life of the process
-     * pins the monitors so the state stays valid through the whole connect.
-     */
-    private fun startMonitors() {
-        if (monitorsStarted) return
-        monitorsStarted = true
-        Wearables.registrationState
-            .onEach { registration.value = it }
-            .launchIn(scope)
-        Wearables.devices
-            .onEach { hasDevice.value = it.isNotEmpty() }
-            .launchIn(scope)
     }
 
     /**
@@ -99,25 +72,31 @@ class GlassesManager(private val appContext: Context) {
         if (_state.value == GlassesState.Ready) return
         _state.value = GlassesState.Connecting
         try {
+            // Wearables can only initialize once per process, and the mock kit
+            // must be enabled before that. If a previous connect already locked
+            // in the other mode, the only way to switch is a process restart.
+            if (initialized && initializedWithMock != useMock) {
+                fail("Restart the app to switch between mock and real glasses.")
+                return
+            }
+
+            // Enable the mock kit BEFORE Wearables.initialize() so the SDK binds
+            // to the mock data layer (registered manifest + mock discovery).
+            if (useMock) mock.enable()
+            val firstInit = !initialized
             initialize()
+            if (firstInit) initializedWithMock = useMock
 
             if (useMock) {
-                mock.enableAndPair()
-            } else {
-                // Await registration settling rather than reading a single
-                // synchronous snapshot, which can be stale right after init.
-                val registered = withTimeoutOrNull(REGISTRATION_TIMEOUT_MS) {
-                    registration.first { it == RegistrationState.REGISTERED }
-                } != null
-                if (!registered) {
-                    fail("Glasses not registered. Register from Settings, or enable the mock device.")
-                    return
-                }
+                mock.pairAndWear()
+            } else if (Wearables.registrationState.value != RegistrationState.REGISTERED) {
+                fail("Glasses not registered. Register from Settings, or enable the mock device.")
+                return
             }
 
             // Wait for a device to surface in discovery before selecting one.
             val haveDevice = withTimeoutOrNull(DISCOVERY_TIMEOUT_MS) {
-                hasDevice.first { it }
+                Wearables.devices.first { it.isNotEmpty() }
             } != null
             if (!haveDevice) {
                 fail("No glasses found.")
@@ -164,24 +143,24 @@ class GlassesManager(private val appContext: Context) {
         runCatching { session?.stop() }
         stream = null
         session = null
-        mock.disable()
+        // Note: the mock kit is left enabled — disabling it can't be undone
+        // without a Wearables re-init, which isn't possible mid-process. A new
+        // connect reuses the already-paired device via pairAndWear().
         _state.value = GlassesState.Unregistered
     }
 
-    /** Tear down any half-open session/mock state and surface the error. */
+    /** Tear down any half-open session and surface the error. */
     private fun fail(message: String) {
         runCatching { session?.removeStream() }
         runCatching { session?.stop() }
         stream = null
         session = null
-        mock.disable()
         _state.value = GlassesState.Error(message)
     }
 
     private companion object {
         const val TAG = "GlassesManager"
         const val FRAME_RATE = 15 // valid: 2, 7, 15, 24, 30
-        const val REGISTRATION_TIMEOUT_MS = 3_000L
         const val DISCOVERY_TIMEOUT_MS = 8_000L
         const val SESSION_TIMEOUT_MS = 5_000L
         const val STREAM_TIMEOUT_MS = 5_000L
