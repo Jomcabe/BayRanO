@@ -50,8 +50,7 @@ class BayRanOApp : Application() {
     override fun onCreate() {
         super.onCreate()
         // Note: Wearables is intentionally NOT initialised here. It can only be
-        // initialised once per process, and the Mock Device Kit must be enabled
-        // beforehand — so init is deferred to the first GlassesManager.connect(),
-        // which enables the mock first when the mock device is selected.
+        // initialised once per process, so init is deferred to the first
+        // real-glasses GlassesManager.connect(). Mock mode never initialises it.
     }
 }

@@ -3,6 +3,7 @@ package com.bayrano.assistant
 import android.content.Context
 import android.os.SystemClock
 import com.bayrano.audio.BluetoothAudioRouter
+import com.bayrano.audio.ElevenLabsConfig
 import com.bayrano.audio.SpeechResult
 import com.bayrano.audio.SpeechToText
 import com.bayrano.audio.TtsSpeaker
@@ -67,7 +68,19 @@ class AssistantEngine(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private val stt = SpeechToText(appContext)
-    private val tts = TtsSpeaker(appContext)
+
+    // Speak with the user's ElevenLabs voice when they've saved a key and picked
+    // one in Settings; otherwise fall back to the on-device TTS engine. The
+    // config is read per utterance so changes apply live.
+    private val tts = TtsSpeaker(appContext) {
+        val key = apiKeyStore.getElevenLabsKey()
+        val voiceId = prefs.elevenLabsVoiceId
+        if (key.isNotBlank() && !voiceId.isNullOrBlank()) {
+            ElevenLabsConfig(apiKey = key, voiceId = voiceId)
+        } else {
+            null
+        }
+    }
     private val audioRouter = BluetoothAudioRouter(appContext)
     private val connectivity = Connectivity(appContext)
 

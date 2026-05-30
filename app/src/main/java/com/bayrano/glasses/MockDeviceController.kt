@@ -5,83 +5,42 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.net.Uri
-import com.meta.wearable.dat.core.types.Permission
-import com.meta.wearable.dat.core.types.PermissionStatus
-import com.meta.wearable.dat.mockdevice.MockDeviceKit
-import com.meta.wearable.dat.mockdevice.api.MockDeviceKitConfig
-import com.meta.wearable.dat.mockdevice.api.MockDeviceKitInterface
-import com.meta.wearable.dat.mockdevice.api.MockRaybanMeta
-import java.io.File
-import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 /**
- * Drives the toolkit's Mock Device Kit so the app runs end-to-end on an emulator
- * with no real glasses. Enabling the kit injects a fake Ray-Ban Meta into the
- * standard [com.meta.wearable.dat.core.Wearables] discovery flow, so the rest of
- * [GlassesManager] uses the exact same session/stream/capture code path as real
- * hardware.
+ * Provides the synthetic camera frame used by "mock device" mode so the app runs
+ * end-to-end on an emulator with no real glasses.
  *
- * The mock camera is fed a synthetic JPEG (generated at runtime, no bundled
- * binary), so [com.meta.wearable.dat.camera.Stream.capturePhoto] returns a
- * deterministic, recognisable frame.
+ * Earlier revisions tried to drive the toolkit's Mock Device Kit
+ * (`com.meta.wearable.dat.mockdevice`) so the emulator went through the exact
+ * same Wearables session/stream/capture path as real hardware. That proved
+ * unreliable: the SDK self-initialised against the real (unregistered) data
+ * layer before the kit could be enabled, the registration manifest read empty
+ * ("Manifest file is empty; hence, app is not registered"), the SDK's
+ * weakly-held state monitors got garbage-collected mid-connect, and
+ * `createSession` ultimately failed with `DatException: No eligible device
+ * found`.
+ *
+ * Mock mode now sidesteps the toolkit completely: [GlassesManager] never touches
+ * `Wearables` in mock mode, and [CameraController] serves the JPEG produced here
+ * instead of a real `Stream.capturePhoto`. The result is deterministic and has
+ * no dependency on the SDK's discovery/registration machinery.
  */
-class MockDeviceController(private val context: Context) {
+class MockDeviceController(@Suppress("unused") private val context: Context) {
 
-    private var kit: MockDeviceKitInterface? = null
-    private var device: MockRaybanMeta? = null
-
-    /**
-     * Turn the kit on with a registered mock manifest. MUST run *before*
-     * [com.meta.wearable.dat.core.Wearables.initialize] — the SDK reads the
-     * registration manifest during init, so enabling the kit afterwards leaves
-     * the injected device ineligible ("No eligible device found").
-     */
-    fun enable() {
-        val k = MockDeviceKit.getInstance(context)
-        if (!k.isEnabled) {
-            k.enable(
-                MockDeviceKitConfig(
-                    /* initiallyRegistered = */ true,
-                    /* initialPermissionsGranted = */ true,
-                ),
-            )
-        }
-        // Belt-and-braces: ensure the glasses' camera permission reads as granted.
-        k.permissions.set(Permission.CAMERA, PermissionStatus.Granted)
-        kit = k
+    /** A labelled synthetic frame as JPEG bytes, ready to drop into a Gemini part. */
+    fun frameJpeg(
+        maxDimPx: Int = ImageScaling.DEFAULT_MAX_DIM_PX,
+        quality: Int = ImageScaling.DEFAULT_QUALITY,
+    ): ByteArray {
+        val bitmap = renderFrame()
+        return ImageScaling.toJpeg(bitmap, maxDimPx, quality).also { bitmap.recycle() }
     }
 
-    /**
-     * Pair + wear the glasses and feed a frame. Runs *after* Wearables init so
-     * the device surfaces in discovery. Idempotent: reuses the already-paired
-     * device on a retry instead of injecting a duplicate.
-     */
-    fun pairAndWear() {
-        val k = kit ?: return
-        val d = device ?: k.pairRaybanMeta()
-        d.powerOn()
-        d.don() // "donning" = wearing; required before the camera will stream.
-
-        val frame = writeSyntheticFrame()
-        d.services.camera.setCapturedImage(frame) // what capturePhoto() returns
-        d.services.camera.setCameraFeed(frame)     // what the video stream shows
-
-        device = d
-    }
-
-    fun disable() {
-        runCatching { device?.let { kit?.unpairDevice(it) } }
-        runCatching { kit?.disable() }
-        device = null
-        kit = null
-    }
-
-    /** Draws a labelled test image to the cache dir and returns its file Uri. */
-    private fun writeSyntheticFrame(): Uri {
+    /** Draws a labelled test image with a couple of recognisable shapes. */
+    private fun renderFrame(): Bitmap {
         val width = 1024
         val height = 768
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -101,10 +60,6 @@ class MockDeviceController(private val context: Context) {
             paint.color = Color.parseColor("#FFD23F")
             drawRect(540f, 420f, 860f, 640f, paint)
         }
-
-        val file = File(context.cacheDir, "mock_frame.jpg")
-        FileOutputStream(file).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 90, it) }
-        bitmap.recycle()
-        return Uri.fromFile(file)
+        return bitmap
     }
 }

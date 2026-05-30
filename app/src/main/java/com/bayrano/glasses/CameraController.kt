@@ -16,6 +16,11 @@ class CameraController(private val glasses: GlassesManager) {
         maxDimPx: Int = ImageScaling.DEFAULT_MAX_DIM_PX,
         quality: Int = ImageScaling.DEFAULT_QUALITY,
     ): ByteArray? {
+        // Mock mode has no real Stream — serve the synthetic frame directly.
+        if (glasses.isMockActive()) {
+            return glasses.mockFrameJpeg(maxDimPx, quality)
+        }
+
         val stream = glasses.currentStream()
         if (stream == null) {
             Log.w(TAG, "capturePhotoJpeg called with no active stream")

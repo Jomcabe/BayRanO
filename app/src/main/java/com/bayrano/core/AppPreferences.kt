@@ -40,6 +40,19 @@ class AppPreferences(context: Context) {
             ?: ThinkingLevel.LOW
         set(value) = prefs.edit().putString(KEY_THINKING, value.name).apply()
 
+    /**
+     * The chosen ElevenLabs voice id. When set (and an ElevenLabs API key is
+     * stored) answers are spoken with that voice instead of the system TTS.
+     */
+    var elevenLabsVoiceId: String?
+        get() = prefs.getString(KEY_ELEVENLABS_VOICE_ID, null)?.takeIf { it.isNotBlank() }
+        set(value) = prefs.edit().putString(KEY_ELEVENLABS_VOICE_ID, value).apply()
+
+    /** Display name of the chosen voice, for showing the current selection in Settings. */
+    var elevenLabsVoiceName: String?
+        get() = prefs.getString(KEY_ELEVENLABS_VOICE_NAME, null)?.takeIf { it.isNotBlank() }
+        set(value) = prefs.edit().putString(KEY_ELEVENLABS_VOICE_NAME, value).apply()
+
     private companion object {
         const val PREFS_NAME = "bayrano_prefs"
         const val KEY_MOCK = "use_mock_device"
@@ -47,5 +60,7 @@ class AppPreferences(context: Context) {
         const val KEY_THINKING = "thinking_level"
         const val KEY_WAKE_ENABLED = "wake_enabled"
         const val KEY_WAKE_TRIGGER = "wake_trigger"
+        const val KEY_ELEVENLABS_VOICE_ID = "elevenlabs_voice_id"
+        const val KEY_ELEVENLABS_VOICE_NAME = "elevenlabs_voice_name"
     }
 }

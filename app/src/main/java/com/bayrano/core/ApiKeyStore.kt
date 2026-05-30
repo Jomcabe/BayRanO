@@ -46,8 +46,23 @@ class ApiKeyStore(context: Context) {
         prefs.edit().remove(KEY_GEMINI).apply()
     }
 
+    /** The ElevenLabs API key, or "" when the user hasn't set one (system TTS). */
+    fun getElevenLabsKey(): String =
+        prefs.getString(KEY_ELEVENLABS, null)?.takeIf { it.isNotBlank() } ?: ""
+
+    fun hasElevenLabsKey(): Boolean = !prefs.getString(KEY_ELEVENLABS, null).isNullOrBlank()
+
+    fun setElevenLabsKey(value: String) {
+        prefs.edit().putString(KEY_ELEVENLABS, value.trim()).apply()
+    }
+
+    fun clearElevenLabsKey() {
+        prefs.edit().remove(KEY_ELEVENLABS).apply()
+    }
+
     private companion object {
         const val PREFS_NAME = "bayrano_secure_prefs"
         const val KEY_GEMINI = "gemini_api_key"
+        const val KEY_ELEVENLABS = "elevenlabs_api_key"
     }
 }

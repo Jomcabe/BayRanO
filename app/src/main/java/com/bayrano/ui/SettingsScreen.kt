@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -54,6 +55,8 @@ fun SettingsScreen(
     val context = LocalContext.current
     var draft by remember { mutableStateOf(viewModel.currentKey()) }
     var reveal by remember { mutableStateOf(false) }
+    var elevenDraft by remember { mutableStateOf(viewModel.currentElevenLabsKey()) }
+    var elevenReveal by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -150,6 +153,98 @@ fun SettingsScreen(
                     )
                 }
             }
+
+            Spacer(Modifier.height(24.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(16.dp))
+
+            Text("Voice (ElevenLabs)", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Optional. Add your ElevenLabs API key and pick a voice to speak " +
+                    "answers with it instead of the device's built-in voice. " +
+                    "Stored encrypted on-device. Current key: ${state.elevenLabsKeyPreview}",
+                style = MaterialTheme.typography.bodySmall,
+            )
+
+            Spacer(Modifier.height(16.dp))
+            OutlinedTextField(
+                value = elevenDraft,
+                onValueChange = { elevenDraft = it },
+                label = { Text("ElevenLabs API key") },
+                singleLine = true,
+                visualTransformation =
+                    if (elevenReveal) VisualTransformation.None else PasswordVisualTransformation(),
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            Spacer(Modifier.height(8.dp))
+            Row {
+                OutlinedButton(onClick = { elevenReveal = !elevenReveal }) {
+                    Text(if (elevenReveal) "Hide" else "Reveal")
+                }
+                Spacer(Modifier.weight(1f))
+                OutlinedButton(
+                    onClick = {
+                        viewModel.clearElevenLabs()
+                        elevenDraft = viewModel.currentElevenLabsKey()
+                    },
+                ) { Text("Reset") }
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = { viewModel.saveElevenLabsKey(elevenDraft) },
+                    enabled = elevenDraft.isNotBlank(),
+                    modifier = Modifier.weight(1f),
+                ) { Text("Save key") }
+                OutlinedButton(
+                    onClick = { viewModel.loadVoices() },
+                    enabled = state.hasElevenLabsKey && !state.voicesLoading,
+                    modifier = Modifier.weight(1f),
+                ) { Text("Load voices") }
+            }
+
+            if (state.voicesLoading) {
+                Spacer(Modifier.height(12.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.height(20.dp))
+                    Text("   Loading voices…", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            state.voicesError?.let { error ->
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "⚠️ $error",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+            }
+
+            if (state.voices.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                Text("Choose a voice", style = MaterialTheme.typography.titleSmall)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    state.voices.forEach { voice ->
+                        FilterChip(
+                            selected = state.selectedVoiceId == voice.id,
+                            onClick = { viewModel.selectVoice(voice) },
+                            label = { Text(voice.name) },
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Text(
+                if (state.selectedVoiceName != null && state.hasElevenLabsKey) {
+                    "Speaking with: ${state.selectedVoiceName}"
+                } else {
+                    "Using the device's built-in voice."
+                },
+                style = MaterialTheme.typography.bodySmall,
+            )
 
             Spacer(Modifier.height(24.dp))
             HorizontalDivider()

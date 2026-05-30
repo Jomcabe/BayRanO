@@ -24,14 +24,15 @@ import kotlinx.coroutines.withTimeoutOrNull
  * only class allowed to import `com.meta.wearable.*`, so SDK 0.x churn stays
  * contained here.
  *
- * The connect path is identical for real glasses and the emulator: the Mock
- * Device Kit ([MockDeviceController]) injects a fake device into [Wearables]
- * discovery, then the same createSession → addStream → start sequence runs.
- *
- * Lifecycle note: `Wearables.initialize` can only run once per process and the
- * Mock Device Kit must be enabled *before* it (the SDK reads the registration
- * manifest during init). So the *first* connect of the process fixes whether
- * we're in mock or real mode — see [connect].
+ * Two connect paths:
+ *  - **Real glasses**: initialise [Wearables], wait for the registered device to
+ *    surface, then createSession → addStream → start. [CameraController] pulls
+ *    stills from the live [Stream].
+ *  - **Mock device** (emulator / no hardware): runs entirely in-app. We do NOT
+ *    touch the toolkit at all — the SDK's mock-device injection proved
+ *    unreliable (empty registration manifest, GC'd state monitors, "No eligible
+ *    device found"). Instead [connect] just goes Ready and [CameraController]
+ *    serves a synthetic frame from [MockDeviceController].
  */
 class GlassesManager(private val appContext: Context) {
 
@@ -43,20 +44,22 @@ class GlassesManager(private val appContext: Context) {
     private var session: DeviceSession? = null
     private var stream: Stream? = null
     private var initialized = false
-    private var initializedWithMock: Boolean? = null
 
-    /** The live camera stream, if connected — used by [CameraController]. */
+    /** True while running against the in-app mock device rather than real glasses. */
+    private var mockActive = false
+
+    /** The live camera stream, if connected to real glasses — used by [CameraController]. */
     fun currentStream(): Stream? = stream
 
-    /**
-     * Initialise the SDK once per process. Safe to call repeatedly.
-     *
-     * Deliberately NOT called from `Application.onCreate` anymore: initialising
-     * eagerly bound the SDK to the real (unregistered) data layer before the
-     * mock kit could be enabled. Init is now deferred to the first [connect],
-     * after the mock kit has had its chance to enable.
-     */
-    fun initialize() {
+    /** Whether the current connection is the in-app mock (no real Wearables session). */
+    fun isMockActive(): Boolean = mockActive
+
+    /** A synthetic frame for mock mode, or null when not in mock mode. */
+    fun mockFrameJpeg(maxDimPx: Int, quality: Int): ByteArray? =
+        if (mockActive) mock.frameJpeg(maxDimPx, quality) else null
+
+    /** Initialise the real-glasses SDK once per process. Safe to call repeatedly. */
+    private fun initialize() {
         if (initialized) return
         runCatching { Wearables.initialize(appContext) }
             .onFailure { Log.w(TAG, "Wearables.initialize failed", it) }
@@ -66,30 +69,27 @@ class GlassesManager(private val appContext: Context) {
     /**
      * Open a device session and a camera stream so [CameraController] can capture.
      *
-     * @param useMock when true, enable the Mock Device Kit first (emulator path).
+     * @param useMock when true, run the in-app mock path (no Wearables SDK).
      */
     suspend fun connect(useMock: Boolean) {
         if (_state.value == GlassesState.Ready) return
         _state.value = GlassesState.Connecting
+
+        if (useMock) {
+            // Mock mode is fully self-contained: no SDK init, no device session.
+            // CameraController.capturePhotoJpeg() serves MockDeviceController's
+            // synthetic frame directly. This avoids the toolkit's flaky mock
+            // injection entirely.
+            mockActive = true
+            _state.value = GlassesState.Ready
+            return
+        }
+
+        mockActive = false
         try {
-            // Wearables can only initialize once per process, and the mock kit
-            // must be enabled before that. If a previous connect already locked
-            // in the other mode, the only way to switch is a process restart.
-            if (initialized && initializedWithMock != useMock) {
-                fail("Restart the app to switch between mock and real glasses.")
-                return
-            }
-
-            // Enable the mock kit BEFORE Wearables.initialize() so the SDK binds
-            // to the mock data layer (registered manifest + mock discovery).
-            if (useMock) mock.enable()
-            val firstInit = !initialized
             initialize()
-            if (firstInit) initializedWithMock = useMock
 
-            if (useMock) {
-                mock.pairAndWear()
-            } else if (Wearables.registrationState.value != RegistrationState.REGISTERED) {
+            if (Wearables.registrationState.value != RegistrationState.REGISTERED) {
                 fail("Glasses not registered. Register from Settings, or enable the mock device.")
                 return
             }
@@ -143,9 +143,7 @@ class GlassesManager(private val appContext: Context) {
         runCatching { session?.stop() }
         stream = null
         session = null
-        // Note: the mock kit is left enabled — disabling it can't be undone
-        // without a Wearables re-init, which isn't possible mid-process. A new
-        // connect reuses the already-paired device via pairAndWear().
+        mockActive = false
         _state.value = GlassesState.Unregistered
     }
 

@@ -16,17 +16,30 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.resume
 
+/** What's needed to speak with an ElevenLabs voice; null means "use system TTS". */
+data class ElevenLabsConfig(val apiKey: String, val voiceId: String)
+
 /**
- * Speaks Gemini's answer out the glasses' speaker via [TextToSpeech].
+ * Speaks Gemini's answer out the glasses' speaker.
+ *
+ * Voice selection:
+ *  - When [elevenLabsConfig] returns a config (the user saved an ElevenLabs API
+ *    key and picked a voice in Settings), the answer is synthesised to MP3 by
+ *    [ElevenLabsClient] and played back. On any failure it falls back to the
+ *    on-device [TextToSpeech] engine rather than going silent.
+ *  - Otherwise the on-device engine is used directly.
  *
  * To FORCE playback to the glasses (a Bluetooth A2DP sink) rather than whatever
- * the system picks, we synthesise to a file and play it through a [MediaPlayer]
- * pinned to the A2DP [AudioDeviceInfo] with [MediaPlayer.setPreferredDevice].
- * This matters because right after mic capture the route can be stuck on SCO or
- * the earpiece. When no Bluetooth sink is present (e.g. emulator) we fall back to
- * speaking directly through the default output.
+ * the system picks, we play through a [MediaPlayer] pinned to the A2DP
+ * [AudioDeviceInfo] with [MediaPlayer.setPreferredDevice]. This matters because
+ * right after mic capture the route can be stuck on SCO or the earpiece. When no
+ * Bluetooth sink is present (e.g. emulator) playback uses the default output.
  */
-class TtsSpeaker(context: Context) {
+class TtsSpeaker(
+    context: Context,
+    private val elevenLabs: ElevenLabsClient = ElevenLabsClient(),
+    private val elevenLabsConfig: () -> ElevenLabsConfig? = { null },
+) {
 
     private val appContext = context.applicationContext
     private val audioManager = appContext.getSystemService(AudioManager::class.java)
@@ -68,14 +81,41 @@ class TtsSpeaker(context: Context) {
         }
     }
 
-    /** Speaks [text], forced to the Bluetooth A2DP sink when one is connected. */
+    /** Speaks [text], using the configured ElevenLabs voice when set, else system TTS. */
     suspend fun speak(text: String) {
         if (text.isBlank()) return
+
+        val config = elevenLabsConfig()
+        if (config != null && speakWithElevenLabs(text, config)) return
+
+        speakWithSystemTts(text)
+    }
+
+    /** Returns true if the ElevenLabs voice spoke the text; false to fall back. */
+    private suspend fun speakWithElevenLabs(text: String, config: ElevenLabsConfig): Boolean {
+        val mp3 = elevenLabs.synthesize(config.apiKey, config.voiceId, text)
+        if (mp3 == null || mp3.isEmpty()) {
+            Log.w(TAG, "ElevenLabs synthesis failed; falling back to system TTS")
+            return false
+        }
+        val file = File(appContext.cacheDir, "tts_el_${nextId()}.mp3")
+        return try {
+            file.writeBytes(mp3)
+            play(file, bluetoothOutputDevice())
+            true
+        } catch (t: Throwable) {
+            Log.w(TAG, "ElevenLabs playback failed; falling back to system TTS", t)
+            false
+        } finally {
+            runCatching { file.delete() }
+        }
+    }
+
+    private suspend fun speakWithSystemTts(text: String) {
         if (!ready.await()) {
             Log.w(TAG, "TTS engine failed to initialise")
             return
         }
-
         val sink = bluetoothOutputDevice()
         if (sink != null) speakForcedTo(text, sink) else speakDirect(text)
     }
@@ -98,11 +138,12 @@ class TtsSpeaker(context: Context) {
             speakDirect(text) // fall back rather than going silent
             return
         }
-        playPinned(file, device)
+        play(file, device)
         runCatching { file.delete() }
     }
 
-    private suspend fun playPinned(file: File, device: AudioDeviceInfo) =
+    /** Plays [file], pinned to [device] when non-null (the "force to glasses"). */
+    private suspend fun play(file: File, device: AudioDeviceInfo?) =
         suspendCancellableCoroutine { cont ->
             val player = MediaPlayer()
             fun finish() {
@@ -115,10 +156,10 @@ class TtsSpeaker(context: Context) {
                 player.setOnCompletionListener { finish() }
                 player.setOnErrorListener { _, _, _ -> finish(); true }
                 player.prepare()
-                player.setPreferredDevice(device) // the actual "force to glasses"
+                if (device != null) player.setPreferredDevice(device)
                 player.start()
             }.onFailure {
-                Log.w(TAG, "Pinned playback failed", it)
+                Log.w(TAG, "Playback failed", it)
                 finish()
             }
             cont.invokeOnCancellation { runCatching { player.release() } }
