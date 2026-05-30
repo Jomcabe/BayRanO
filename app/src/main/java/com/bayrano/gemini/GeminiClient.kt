@@ -2,6 +2,7 @@ package com.bayrano.gemini
 
 import android.util.Base64
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -11,6 +12,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import kotlin.random.Random
 
 /** Result of a generateContent call. */
 sealed interface GeminiResult {
@@ -19,19 +21,45 @@ sealed interface GeminiResult {
 }
 
 /**
- * Thin OkHttp wrapper over the Gemini REST `generateContent` endpoint. No SDK,
- * to avoid version drift. JSON is built/parsed with [org.json] (bundled with
+ * Thin OkHttp wrapper over the Gemini REST `generateContent` endpoint
+ * (gemini-3.5-flash), authenticated with the `x-goog-api-key` header. No SDK, to
+ * avoid version drift; JSON is built/parsed with [org.json] (bundled with
  * Android) so we pull in no serialization library.
+ *
+ * Features:
+ *  - image (inline_data base64 JPEG) + question text + system instruction
+ *  - Grounding with Google Search (the `google_search` tool) when requested
+ *  - the last N user/model turns sent as conversational context
+ *  - exponential-backoff retry on HTTP 429/503 (and network blips)
+ *
+ * The two speed knobs come from [generationParams] (Settings-backed) so changes
+ * apply per request.
  */
 class GeminiClient(
     private val config: GeminiConfig = GeminiConfig(),
+    private val generationParams: () -> GenerationParams = { GenerationParams() },
     private val http: OkHttpClient = defaultHttp(),
 ) {
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
+    /** The model id used for requests (for logging/telemetry). */
+    val modelName: String get() = config.model
+
+    private data class Turn(val role: String, val text: String) // role: "user" | "model"
+    private val historyLock = Any()
+    private val history = ArrayDeque<Turn>()
+
+    /** Drop all conversational context (e.g. when starting a new session). */
+    fun resetConversation() = synchronized(historyLock) { history.clear() }
+
     /**
-     * Sends [prompt] plus an optional JPEG ([jpegBytes]) and returns the model's
-     * text. Runs on [Dispatchers.IO]; safe to call from a coroutine.
+     * Send [prompt] (plus an optional JPEG and the kept context) and return the
+     * model's text. Runs on [Dispatchers.IO]; safe to call from a coroutine.
+     *
+     * @param detailed use the "elaborate" system instruction (longer answer).
+     *
+     * Grounding: the google_search tool is always offered (see [GeminiConfig.useGoogleSearch])
+     * and Gemini itself decides whether to actually search — we don't gate it.
      */
     suspend fun ask(
         apiKey: String,
@@ -45,7 +73,9 @@ class GeminiClient(
 
         val systemInstruction =
             if (detailed) config.elaborateInstruction else config.systemInstruction
-        val body = buildRequestJson(prompt, jpegBytes, systemInstruction).toString()
+        val priorTurns = synchronized(historyLock) { history.toList() }
+        val body = buildRequestJson(prompt, jpegBytes, systemInstruction, priorTurns)
+            .toString()
             .toRequestBody(jsonMediaType)
 
         val request = Request.Builder()
@@ -54,55 +84,87 @@ class GeminiClient(
             .post(body)
             .build()
 
-        try {
-            http.newCall(request).execute().use { response ->
-                val payload = response.body?.string().orEmpty()
-                if (!response.isSuccessful) {
-                    return@withContext GeminiResult.Error(
-                        message = extractApiError(payload) ?: "HTTP ${response.code}",
-                        httpCode = response.code,
-                    )
+        var attempt = 0
+        while (true) {
+            val response = try {
+                http.newCall(request).execute()
+            } catch (e: IOException) {
+                if (attempt < config.maxRetries) {
+                    delay(backoffDelayMs(attempt, retryAfterMs = null))
+                    attempt++
+                    continue
                 }
-                parseText(payload)
-                    ?.let { GeminiResult.Success(it) }
-                    ?: GeminiResult.Error("Empty or unparseable response.")
+                return@withContext GeminiResult.Error("Network error: ${e.message}")
             }
-        } catch (e: IOException) {
-            GeminiResult.Error("Network error: ${e.message}")
+
+            val code = response.code
+            val retryAfter = response.header("Retry-After")
+            val payload = response.body?.string().orEmpty()
+            response.close()
+
+            if (code in 200..299) {
+                val text = parseText(payload)
+                return@withContext if (text != null) {
+                    recordTurn(prompt, text)
+                    GeminiResult.Success(text)
+                } else {
+                    GeminiResult.Error("Empty or unparseable response.")
+                }
+            }
+
+            val retryable = code == 429 || code == 503
+            if (retryable && attempt < config.maxRetries) {
+                delay(backoffDelayMs(attempt, parseRetryAfterMs(retryAfter)))
+                attempt++
+                continue
+            }
+
+            return@withContext GeminiResult.Error(
+                message = extractApiError(payload) ?: "HTTP $code",
+                httpCode = code,
+            )
         }
+        @Suppress("UNREACHABLE_CODE")
+        GeminiResult.Error("Unreachable")
     }
 
     private fun buildRequestJson(
         prompt: String,
         jpegBytes: ByteArray?,
         systemInstruction: String,
+        priorTurns: List<Turn>,
     ): JSONObject {
+        val contents = JSONArray()
+        // Prior context turns (text only — we don't resend old images).
+        for (turn in priorTurns) {
+            contents.put(
+                JSONObject()
+                    .put("role", turn.role)
+                    .put("parts", JSONArray().put(JSONObject().put("text", turn.text))),
+            )
+        }
+
+        // Current user turn: text + optional inline image.
         val parts = JSONArray().put(JSONObject().put("text", prompt))
         if (jpegBytes != null) {
             val b64 = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
             parts.put(
                 JSONObject().put(
                     "inline_data",
-                    JSONObject()
-                        .put("mime_type", "image/jpeg")
-                        .put("data", b64),
+                    JSONObject().put("mime_type", "image/jpeg").put("data", b64),
                 ),
             )
         }
+        contents.put(JSONObject().put("role", "user").put("parts", parts))
 
-        val contents = JSONArray().put(
-            JSONObject()
-                .put("role", "user")
-                .put("parts", parts),
-        )
-
-        // Gemini-3 knobs. Casing is the documented snake_case; confirm against a
-        // live call and switch to mediaResolution / thinkingConfig if needed.
+        // camelCase knobs: mediaResolution direct; thinkingLevel nested. Never
+        // send thinkingBudget alongside thinkingLevel (both 400).
+        val params = generationParams()
         val generationConfig = JSONObject()
-            .put("media_resolution", config.mediaResolution)
-            .put("thinking_level", config.thinkingLevel)
+            .put("mediaResolution", params.mediaResolution)
+            .put("thinkingConfig", JSONObject().put("thinkingLevel", params.thinkingLevel))
 
-        return JSONObject()
+        val body = JSONObject()
             .put("contents", contents)
             .put("generationConfig", generationConfig)
             .put(
@@ -112,7 +174,33 @@ class GeminiClient(
                     JSONArray().put(JSONObject().put("text", systemInstruction)),
                 ),
             )
+
+        if (config.useGoogleSearch) {
+            // Grounding with Google Search. The tool is always offered; Gemini
+            // decides per request whether it actually needs to search the web.
+            body.put("tools", JSONArray().put(JSONObject().put("google_search", JSONObject())))
+        }
+        return body
     }
+
+    /** Append the exchange to context and trim to the last [GeminiConfig.maxContextTurns]. */
+    private fun recordTurn(userText: String, modelText: String) = synchronized(historyLock) {
+        history.addLast(Turn("user", userText))
+        history.addLast(Turn("model", modelText))
+        val maxEntries = config.maxContextTurns * 2
+        while (history.size > maxEntries) history.removeFirst()
+    }
+
+    private fun backoffDelayMs(attempt: Int, retryAfterMs: Long?): Long {
+        if (retryAfterMs != null) return retryAfterMs.coerceIn(0, config.maxBackoffMs)
+        val exponential = config.baseBackoffMs shl attempt // base * 2^attempt
+        val jitter = Random.nextLong(0, config.baseBackoffMs)
+        return (exponential + jitter).coerceAtMost(config.maxBackoffMs)
+    }
+
+    /** Parse a numeric `Retry-After` (seconds) to milliseconds; ignore HTTP-date form. */
+    private fun parseRetryAfterMs(header: String?): Long? =
+        header?.trim()?.toLongOrNull()?.let { it * 1000 }
 
     private fun parseText(payload: String): String? = runCatching {
         JSONObject(payload)

@@ -2,6 +2,10 @@ package com.bayrano.ui
 
 import androidx.lifecycle.AndroidViewModel
 import com.bayrano.app.BayRanOApp
+import com.bayrano.gemini.MediaResolution
+import com.bayrano.gemini.ThinkingLevel
+import com.bayrano.wake.WakeService
+import com.bayrano.wake.WakeTrigger
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -9,12 +13,16 @@ import kotlinx.coroutines.flow.asStateFlow
 data class SettingsUiState(
     val keyPreview: String = "",
     val hasUserKey: Boolean = false,
-    val savedAt: Long = 0L,
+    val mediaResolution: MediaResolution = MediaResolution.MEDIUM,
+    val thinkingLevel: ThinkingLevel = ThinkingLevel.LOW,
+    val wakeEnabled: Boolean = false,
+    val wakeTrigger: WakeTrigger = WakeTrigger.VOLUME_UP,
 )
 
 class SettingsViewModel(app: BayRanOApp) : AndroidViewModel(app) {
 
     private val store = app.apiKeyStore
+    private val prefs = app.appPreferences
 
     private val _uiState = MutableStateFlow(currentState())
     val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
@@ -32,11 +40,36 @@ class SettingsViewModel(app: BayRanOApp) : AndroidViewModel(app) {
         _uiState.value = currentState()
     }
 
+    fun setMediaResolution(value: MediaResolution) {
+        prefs.mediaResolution = value
+        _uiState.value = currentState()
+    }
+
+    fun setThinkingLevel(value: ThinkingLevel) {
+        prefs.thinkingLevel = value
+        _uiState.value = currentState()
+    }
+
+    fun setWakeEnabled(enabled: Boolean) {
+        prefs.wakeEnabled = enabled
+        if (enabled) WakeService.start(getApplication()) else WakeService.stop(getApplication())
+        _uiState.value = currentState()
+    }
+
+    fun setWakeTrigger(value: WakeTrigger) {
+        prefs.wakeTrigger = value
+        _uiState.value = currentState()
+    }
+
     private fun currentState(): SettingsUiState {
         val key = store.getGeminiKey()
         return SettingsUiState(
             keyPreview = maskKey(key),
             hasUserKey = store.hasUserKey(),
+            mediaResolution = prefs.mediaResolution,
+            thinkingLevel = prefs.thinkingLevel,
+            wakeEnabled = prefs.wakeEnabled,
+            wakeTrigger = prefs.wakeTrigger,
         )
     }
 

@@ -1,6 +1,11 @@
 package com.bayrano.ui
 
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -11,12 +16,15 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -24,19 +32,26 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.bayrano.core.BatteryOptimization
+import com.bayrano.gemini.MediaResolution
+import com.bayrano.gemini.ThinkingLevel
+import com.bayrano.wake.WakeTrigger
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     viewModel: SettingsViewModel,
     onBack: () -> Unit,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     var draft by remember { mutableStateOf(viewModel.currentKey()) }
     var reveal by remember { mutableStateOf(false) }
 
@@ -56,6 +71,7 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp),
         ) {
             Text("Gemini API key", style = MaterialTheme.typography.titleMedium)
@@ -99,6 +115,93 @@ fun SettingsScreen(
                 enabled = draft.isNotBlank(),
                 modifier = Modifier.fillMaxWidth(),
             ) { Text("Save key") }
+
+            Spacer(Modifier.height(24.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(16.dp))
+
+            Text("Speed vs. quality", style = MaterialTheme.typography.titleMedium)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Lower is faster and cheaper; higher gives more visual detail and reasoning.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+
+            Spacer(Modifier.height(16.dp))
+            Text("Image resolution", style = MaterialTheme.typography.titleSmall)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                MediaResolution.entries.forEach { option ->
+                    FilterChip(
+                        selected = state.mediaResolution == option,
+                        onClick = { viewModel.setMediaResolution(option) },
+                        label = { Text(option.label) },
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+            Text("Thinking level", style = MaterialTheme.typography.titleSmall)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                ThinkingLevel.entries.forEach { option ->
+                    FilterChip(
+                        selected = state.thinkingLevel == option,
+                        onClick = { viewModel.setThinkingLevel(option) },
+                        label = { Text(option.label) },
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(24.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(16.dp))
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Hands-free wake", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Hold an active media session so a glasses gesture wakes the " +
+                            "assistant. Only works while nothing else is playing audio.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Switch(
+                    checked = state.wakeEnabled,
+                    onCheckedChange = { viewModel.setWakeEnabled(it) },
+                )
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Text("Wake gesture", style = MaterialTheme.typography.titleSmall)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                WakeTrigger.entries.forEach { option ->
+                    FilterChip(
+                        selected = state.wakeTrigger == option,
+                        onClick = { viewModel.setWakeTrigger(option) },
+                        label = { Text(option.label) },
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Tip: a Quick Settings tile and the on-screen mic button work " +
+                    "anytime, even when another app owns audio.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+
+            Spacer(Modifier.height(12.dp))
+            OutlinedButton(
+                onClick = { BatteryOptimization.requestExemption(context) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    if (BatteryOptimization.isIgnoring(context)) {
+                        "Battery optimization: ignored ✓ (review)"
+                    } else {
+                        "Disable battery optimization"
+                    },
+                )
+            }
+            Spacer(Modifier.height(24.dp))
         }
     }
 }

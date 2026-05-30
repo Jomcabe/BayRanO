@@ -44,6 +44,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.bayrano.assistant.AssistantUiState
+import com.bayrano.assistant.TranscriptEntry
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
