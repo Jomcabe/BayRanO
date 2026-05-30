@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose draws the real theme; this base keeps the splash/system bars
+         sane before Compose takes over. -->
+    <style name="Theme.BayRanO" parent="android:Theme.Material.NoActionBar" />
+</resources>
